@@ -1,0 +1,5 @@
+data/
+downloads/
+downloads_atual/
+db_atual.json
+node_modules/
