@@ -15,12 +15,12 @@ function convertDate(dateString) {
     if (!dateString) return "";
     
     // Tenta capturar Ano, Mês e Dia. Ex: "2025 Dec 1..."
-    const match = dateString.match(/^(\d{4})\s+([A-Za-z]{3})\s+(\d+)/);
+    const match = dateString.match(/^(\d{4})\s+([A-Za-z]{3})[;\s]+(\d+)/);
     
     if (match) {
         const year = match[1];
         const monthStr = match[2];
-        const day = match[3].padStart(2, '0');
+        let day = match[3];
         
         const months = {
             'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
@@ -29,7 +29,14 @@ function convertDate(dateString) {
             'Fev': '02', 'Abr': '04', 'Mai': '05', 'Ago': '08', 'Set': '09', 'Out': '10', 'Dez': '12'
         };
         
-        const month = months[monthStr] || '00';
+        const month = months[monthStr]; // Validation: check if month exists
+        
+        if (!month) return dateString; // Invalid Month
+        
+        const dayNum = parseInt(day, 10);
+        if (dayNum < 1 || dayNum > 31) return dateString; // Invalid Day
+        
+        day = day.padStart(2, '0');
         
         return `${day}/${month}/${year}`;
     }
@@ -89,7 +96,7 @@ function loadCheckpoint() {
 }
 
 //FUNÇÃO PARA PAGINAÇÃO
-async function pagination(page, scrapeFunction) {
+async function pagination(page, scrapeFunction, options = {}) {
   const allArticles = [];
 
   // 1. Identificar o total de páginas
@@ -111,16 +118,26 @@ async function pagination(page, scrapeFunction) {
 
   console.log(`Total de páginas detectadas: ${totalPages}`);
 
-  // 2. Carregar Checkpoint
-  const lastPage = loadCheckpoint();
-  console.log(`Checkpoint carregado: ${lastPage}`);
-  
+  // 2. Carregar Checkpoint ou usar options.startPage
   let startPage = 1;
+  
+  if (options.startPage) {
+      startPage = options.startPage;
+      console.log(`Iniciando da página ${startPage} (definido via options)...`);
+  } else {
+      const lastPage = loadCheckpoint();
+      console.log(`Checkpoint carregado: ${lastPage}`);
+      if (lastPage > 0 && lastPage < totalPages) {
+          startPage = lastPage + 1;
+          console.log(`Retomando raspagem da página ${startPage} (Checkpoint: ${lastPage})...`);
+      } else if (lastPage >= totalPages && totalPages > 1) {
+          console.log(`Raspagem já concluída anteriormente (Checkpoint ${lastPage} >= Total ${totalPages}).`);
+          return allArticles;
+      }
+  }
 
-  if (lastPage > 0 && lastPage < totalPages) {
-      startPage = lastPage + 1;
-      console.log(`Retomando raspagem da página ${startPage} (Checkpoint: ${lastPage})...`);
-      
+  // Lógica de salto inicial (apenas se NÃO for ignorada)
+  if (!options.skipInitialNavigation && startPage > 1) {
       const currentUrl = page.url();
       const baseUrl = currentUrl.replace(/([?&])page=\d+/, ''); 
       const separator = baseUrl.includes('?') ? '&' : '?';
@@ -128,10 +145,6 @@ async function pagination(page, scrapeFunction) {
       
       console.log(`Saltando para URL: ${jumpUrl}`);
       await page.goto(jumpUrl, { waitUntil: 'networkidle2' });
-      
-  } else if (lastPage >= totalPages && totalPages > 1) {
-      console.log(`Raspagem já concluída anteriormente (Checkpoint ${lastPage} >= Total ${totalPages}).`);
-      return allArticles;
   }
 
   for (let currentPage = startPage; currentPage <= totalPages; currentPage++) {
