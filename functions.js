@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 
 // Garante que os diretórios existem
 const dataDir = path.join(__dirname, 'data');
@@ -14,34 +13,61 @@ if (!fs.existsSync(pdfDir)) fs.mkdirSync(pdfDir);
 function convertDate(dateString) {
     if (!dateString) return "";
     
-    // Tenta capturar Ano, Mês e Dia. Ex: "2025 Dec 1..."
-    const match = dateString.match(/^(\d{4})\s+([A-Za-z]{3})[;\s]+(\d+)/);
+    // 1. Se já estiver no formato dd/mm/yyyy, mantém
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateString)) {
+        return dateString;
+    }
+
+    const cleanDate = dateString.trim();
+
+    // Mapeamento de meses (inglês e português)
+    const months = {
+        'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+        'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
+        'fev': '02', 'abr': '04', 'mai': '05', 'ago': '08', 'set': '09', 'out': '10', 'dez': '12'
+    };
+
+    // 2. Tenta capturar Ano, Mês e Dia (Ex: "2025 Dec 1" ou "2025 Dec 01")
+    // Regex ajustado para ser mais flexível com separadores
+    const fullDateMatch = cleanDate.match(/^(\d{4})[\s,]+([A-Za-z]{3})[\s,;]+(\d+)/);
     
-    if (match) {
-        const year = match[1];
-        const monthStr = match[2];
-        let day = match[3];
+    if (fullDateMatch) {
+        const year = fullDateMatch[1];
+        const monthStr = fullDateMatch[2].toLowerCase();
+        let day = fullDateMatch[3];
         
-        const months = {
-            'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04', 'May': '05', 'Jun': '06',
-            'Jul': '07', 'Aug': '08', 'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12',
-            // Port
-            'Fev': '02', 'Abr': '04', 'Mai': '05', 'Ago': '08', 'Set': '09', 'Out': '10', 'Dez': '12'
-        };
+        const month = months[monthStr]; 
         
-        const month = months[monthStr]; // Validation: check if month exists
+        if (month) {
+            const dayNum = parseInt(day, 10);
+            if (dayNum >= 1 && dayNum <= 31) {
+                day = day.padStart(2, '0');
+                return `${day}/${month}/${year}`;
+            }
+        }
+    }
+
+    // 3. Tenta capturar Ano e Mês (sem dia) -> Assume dia 01
+    // Ex: "2025 Dec" ou "2025 Dec;..."
+    const monthYearMatch = cleanDate.match(/^(\d{4})[\s,]+([A-Za-z]{3})/);
+    
+    if (monthYearMatch) {
+        const year = monthYearMatch[1];
+        const monthStr = monthYearMatch[2].toLowerCase();
+        const month = months[monthStr];
         
-        if (!month) return dateString; // Invalid Month
-        
-        const dayNum = parseInt(day, 10);
-        if (dayNum < 1 || dayNum > 31) return dateString; // Invalid Day
-        
-        day = day.padStart(2, '0');
-        
-        return `${day}/${month}/${year}`;
+        if (month) {
+             return `01/${month}/${year}`;
+        }
     }
     
-    return dateString; // Retorna original se não casar com regex
+    // 4. Se falhar tudo, tenta extrair apenas o ano (YYYY)
+    const yearMatch = cleanDate.match(/\b\d{4}\b/);
+    if (yearMatch) {
+        return yearMatch[0];
+    }
+    
+    return dateString; 
 }
 
 // Função auxiliar para salvar no DB único
@@ -71,12 +97,26 @@ function saveToDb(articleData) {
     fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
 }
 
+
+
 const checkpointPath = path.join(dataDir, 'checkpoint.json');
 
 // FUNÇÃO PARA SALVAR CHECKPOINT
-function saveCheckpoint(pageNumber) {
+function saveCheckpoint(data) {
     try {
-        fs.writeFileSync(checkpointPath, JSON.stringify({ lastProcessedPage: pageNumber }));
+        let current = {};
+        if (fs.existsSync(checkpointPath)) {
+            const content = fs.readFileSync(checkpointPath, 'utf8');
+            if (content.trim()) {
+                current = JSON.parse(content);
+            }
+        }
+        
+        // Se for apenas um número, assume que é a página (para manter compatibilidade se necessário)
+        const update = typeof data === 'number' ? { lastProcessedPage: data } : data;
+        const newData = { ...current, ...update };
+        
+        fs.writeFileSync(checkpointPath, JSON.stringify(newData, null, 2));
     } catch (e) {
         console.error("Erro ao salvar checkpoint:", e.message);
     }
@@ -86,13 +126,15 @@ function saveCheckpoint(pageNumber) {
 function loadCheckpoint() {
     try {
         if (fs.existsSync(checkpointPath)) {
-            const data = JSON.parse(fs.readFileSync(checkpointPath));
-            return data.lastProcessedPage || 0;
+            const content = fs.readFileSync(checkpointPath, 'utf8');
+            if (content.trim()) {
+                return JSON.parse(content);
+            }
         }
     } catch (e) {
         console.error("Erro ao ler checkpoint:", e.message);
     }
-    return 0;
+    return {};
 }
 
 //FUNÇÃO PARA PAGINAÇÃO
@@ -120,12 +162,13 @@ async function pagination(page, scrapeFunction, options = {}) {
 
   // 2. Carregar Checkpoint ou usar options.startPage
   let startPage = 1;
+  const checkpoint = loadCheckpoint();
+  const lastPage = checkpoint.lastProcessedPage || 0;
   
   if (options.startPage) {
       startPage = options.startPage;
       console.log(`Iniciando da página ${startPage} (definido via options)...`);
   } else {
-      const lastPage = loadCheckpoint();
       console.log(`Checkpoint carregado: ${lastPage}`);
       if (lastPage > 0 && lastPage < totalPages) {
           startPage = lastPage + 1;
@@ -311,19 +354,45 @@ async function downloadPdf(page, title) {
 async function extractArticles(page) {
     const scrapedData = [];
     
+    // Carrega o DB uma única vez para otimizar a checagem de duplicidade
+    let db = [];
+    if (fs.existsSync(dbPath)) {
+        try {
+            const content = fs.readFileSync(dbPath, 'utf8');
+            if (content.trim()) db = JSON.parse(content);
+        } catch (e) {
+            console.error("Erro ao carregar DB para checagem:", e.message);
+        }
+    }
+
     // 1. Coleta os links da página de resultados
     const articleLinks = await page.evaluate(() => {
-        const anchors = Array.from(document.querySelectorAll('.docsum-title'));
-        return anchors.map(a => ({
-            href: a.href, // Link absoluto
-            title: a.innerText.trim()
-        }));
+        const articles = Array.from(document.querySelectorAll('.docsum-content'));
+        return articles.map(article => {
+            const titleEl = article.querySelector('.docsum-title');
+            const journalEl = article.querySelector('.docsum-journal-citation.short-journal-citation');
+            
+            return {
+                href: titleEl ? titleEl.href : null,
+                title: titleEl ? titleEl.innerText.trim() : "Título Desconhecido",
+                journal: journalEl ? journalEl.innerText.trim() : "Revista Desconhecida"
+            };
+        }).filter(a => a.href);
     });
 
     console.log(`Encontrados ${articleLinks.length} artigos nesta página.`);
 
     // 2. Itera sobre cada artigo
     for (const article of articleLinks) {
+        // VERIFICAÇÃO DE DUPLICIDADE (DB + Arquivo Físico)
+        const entry = db.find(item => item.link === article.href);
+        const pdfExists = entry && entry.pdfPath && fs.existsSync(path.join(__dirname, entry.pdfPath));
+
+        if (pdfExists) {
+            console.log(`Artigo já processado e PDF presente, pulando: ${article.title}`);
+            continue;
+        }
+
         let articlePage;
         try {
             console.log(`Processando: ${article.title}`);
@@ -356,6 +425,14 @@ async function extractArticles(page) {
                 return { title, authors, dateStr, abstract, articleType };
             });
 
+            // Clean Abstract Logic
+            let cleanedAbstract = rawDetails.abstract;
+            if (cleanedAbstract && cleanedAbstract !== 'Resumo não disponível') {
+                const headerPattern = /(?:^|\s+)(Objetivo|Introduction|Introdução|Background|Purpose|Aim|Resumo|Abstract|Context|Racional|Método|Métodos|Methods|Resultados|Results|Conclusão|Conclusões|Conclusions|Conclusion)(?::+)\s*/gi;
+                cleanedAbstract = cleanedAbstract.replace(headerPattern, ' ').trim();
+                cleanedAbstract = cleanedAbstract.replace(/\s+/g, ' ');
+            }
+
             // Converte a data aqui no Node.js
             const formattedDate = convertDate(rawDetails.dateStr);
 
@@ -363,8 +440,9 @@ async function extractArticles(page) {
                 title: rawDetails.title,
                 authors: rawDetails.authors,
                 date: formattedDate,
-                abstract: rawDetails.abstract,
+                abstract: cleanedAbstract, // Use the cleaned version
                 article: rawDetails.articleType, 
+                nome_revista: article.journal, // Include extracted journal name 
                 link: article.href,
                 pdfDownloaded: false,
                 pdfPath: null,
@@ -383,6 +461,7 @@ async function extractArticles(page) {
                 articleData.pdfDownloaded = true;
                 articleData.pdfPath = `downloads/${downloadResult.filename}`;
                 articleData.pdfUrl = downloadResult.url;
+                articleData.cdnUrl = `https://carteira-de-saude.b-cdn.net/artigos_medicos/pubmed/${downloadResult.filename}`;
                 
                 // 5. Salva no DB unico (APENAS SE SUCESSO)
                 saveToDb(articleData);
@@ -405,5 +484,4 @@ async function extractArticles(page) {
     return scrapedData;
 }
 
-module.exports = { pagination, extractArticles };
-
+module.exports = { pagination, extractArticles, downloadPdf, loadCheckpoint, saveCheckpoint };
